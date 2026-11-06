@@ -32,6 +32,10 @@ const VOD_WEB_BASE: &str = "https://www.twitch.tv/videos";
 const MAX_USERS_PER_REQUEST: usize = 100;
 /// Concurrent VOD lookups per status report.
 const MAX_CONCURRENT_VOD_REQUESTS: usize = 8;
+/// Broadcasts per history page (Helix maximum is 100).
+const VOD_PAGE_SIZE: usize = 100;
+/// Hard cap on history pages per streamer per refresh.
+const MAX_VOD_PAGES: usize = 10;
 /// Refresh the app token this long before it actually expires.
 const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -50,14 +54,16 @@ pub struct TwitchUser {
 
 struct CachedToken {
     value: String,
+    /// Stop handing this token out after this instant (before true expiry).
+    refresh_after: Instant,
+    /// True server-side expiry; the token is never used past this instant.
     expires_at: Instant,
 }
 
 /// Helix client with a cached app access token.
 pub struct TwitchClient {
     http: Client,
-    client_id: String,
-    client_secret: String,
+    credentials: Credentials,
     token: Mutex<Option<CachedToken>>,
 }
 
@@ -65,6 +71,33 @@ pub struct TwitchClient {
 struct TokenResponse {
     access_token: Option<String>,
     expires_in: Option<u64>,
+}
+
+/// Parse a token endpoint body into `(token, lifetime)`.
+///
+/// Malformed responses — missing/empty token, missing or zero `expires_in` —
+/// are explicit errors, never silently guessed (BUG_REVIEW #18).
+fn parse_token_body(body: &str) -> Result<(String, Duration), String> {
+    let parsed: TokenResponse = serde_json::from_str(body)
+        .map_err(|error| format!("Twitch returned an unreadable app token response: {error}"))?;
+    let value = parsed
+        .access_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| "Twitch returned an empty app token.".to_string())?;
+    let ttl_seconds = parsed
+        .expires_in
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| "Twitch returned a token without a valid expiry.".to_string())?;
+    Ok((value, Duration::from_secs(ttl_seconds)))
+}
+
+/// `(usable lifetime, hard lifetime)` for a token TTL.
+///
+/// The token stops being handed out `min(60s, ttl/4)` before it expires, and
+/// is never used past its true expiry — a 20-second token is usable for 15.
+fn token_lifetimes(ttl: Duration) -> (Duration, Duration) {
+    let margin = TOKEN_REFRESH_MARGIN.min(ttl / 4);
+    (ttl.saturating_sub(margin), ttl)
 }
 
 #[derive(Deserialize)]
@@ -85,6 +118,14 @@ struct RawUser {
 #[derive(Deserialize)]
 struct VideosResponse {
     data: Vec<RawVideo>,
+    #[serde(default)]
+    pagination: Option<RawPagination>,
+}
+
+#[derive(Deserialize)]
+struct RawPagination {
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -118,8 +159,7 @@ impl TwitchClient {
 
         Ok(Self {
             http,
-            client_id: credentials.client_id.clone(),
-            client_secret: credentials.client_secret.clone(),
+            credentials: credentials.clone(),
             token: Mutex::new(None),
         })
     }
@@ -128,7 +168,8 @@ impl TwitchClient {
     async fn access_token(&self) -> Result<String, String> {
         let mut cached_slot = self.token.lock().await;
         if let Some(cached) = cached_slot.as_ref() {
-            if cached.expires_at > Instant::now() {
+            let now = Instant::now();
+            if now < cached.refresh_after && now < cached.expires_at {
                 return Ok(cached.value.clone());
             }
         }
@@ -137,8 +178,8 @@ impl TwitchClient {
             .http
             .post(TOKEN_URL)
             .form(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
+                ("client_id", self.credentials.client_id.as_str()),
+                ("client_secret", self.credentials.client_secret.as_str()),
                 ("grant_type", "client_credentials"),
             ])
             .send()
@@ -154,27 +195,33 @@ impl TwitchClient {
             ));
         }
 
-        let body: TokenResponse = response
-            .json()
-            .await
-            .map_err(|error| format!("Twitch returned an unreadable app token response: {error}"))?;
+        let body = response.text().await.map_err(|error| {
+            format!("Twitch returned an unreadable app token response: {error}")
+        })?;
+        let (value, ttl) = parse_token_body(&body)?;
 
-        let value = body
-            .access_token
-            .filter(|token| !token.trim().is_empty())
-            .ok_or_else(|| "Twitch returned an empty app token.".to_string())?;
-
-        let ttl = body.expires_in.unwrap_or(3_600);
-        let lifetime = Duration::from_secs(
-            ttl.saturating_sub(TOKEN_REFRESH_MARGIN.as_secs())
-                .max(30),
-        );
+        let fetched_at = Instant::now();
+        let (usable, hard) = token_lifetimes(ttl);
         *cached_slot = Some(CachedToken {
             value: value.clone(),
-            expires_at: Instant::now() + lifetime,
+            refresh_after: fetched_at + usable,
+            expires_at: fetched_at + hard,
         });
 
         Ok(value)
+    }
+
+    /// Forget the cached token only if it is still the token that was used.
+    /// A late 401 must not clear a token another request already refreshed
+    /// (BUG_REVIEW #18).
+    async fn invalidate_token(&self, used_token: &str) {
+        let mut cached_slot = self.token.lock().await;
+        if cached_slot
+            .as_ref()
+            .is_some_and(|cached| cached.value == used_token)
+        {
+            *cached_slot = None;
+        }
     }
 
     /// GET a Helix endpoint, retrying exactly once after a 401.
@@ -190,7 +237,7 @@ impl TwitchClient {
                 .http
                 .get(format!("{HELIX_BASE}{path}"))
                 .query(&query)
-                .header("Client-Id", self.client_id.as_str())
+                .header("Client-Id", self.credentials.client_id.as_str())
                 .header("Authorization", format!("Bearer {token}"))
                 .send()
                 .await
@@ -200,7 +247,7 @@ impl TwitchClient {
 
             if status == StatusCode::UNAUTHORIZED && !retried {
                 retried = true;
-                *self.token.lock().await = None;
+                self.invalidate_token(&token).await;
                 continue;
             }
 
@@ -267,61 +314,90 @@ impl TwitchClient {
         Ok(users)
     }
 
-    /// Latest archived broadcast for a user, or `None` when there is none.
-    pub async fn fetch_latest_vod(&self, user_id: &str) -> Result<Option<VodInfo>, String> {
-        let query = vec![
-            ("user_id".to_string(), user_id.to_string()),
-            ("type".to_string(), "archive".to_string()),
-            ("first".to_string(), "1".to_string()),
-            ("sort".to_string(), "time".to_string()),
-        ];
+    /// Paginated archived-broadcast history for a user, newest first.
+    ///
+    /// Pages until the oldest fetched broadcast's shifted window has fully
+    /// ended (older pages can only matter via implausibly long durations),
+    /// the history runs out, or [`MAX_VOD_PAGES`] is reached — enough to cover
+    /// any configured delay up to 168h for realistic streaming cadences
+    /// (BUG_REVIEW #1). Durations are fetched fresh on every call, so a
+    /// still-growing in-progress broadcast is re-measured each refresh.
+    pub async fn fetch_vod_history(
+        &self,
+        user_id: &str,
+        offset_hours: f64,
+    ) -> Result<Vec<VodInfo>, String> {
+        let fetch_started = Utc::now();
+        let mut history: Vec<VodInfo> = Vec::new();
+        let mut after: Option<String> = None;
 
-        let response: VideosResponse = self.get_json("/videos", query).await?;
-        let Some(raw) = response.data.into_iter().next() else {
-            return Ok(None);
-        };
+        for _page in 0..MAX_VOD_PAGES {
+            let mut query = vec![
+                ("user_id".to_string(), user_id.to_string()),
+                ("type".to_string(), "archive".to_string()),
+                ("first".to_string(), VOD_PAGE_SIZE.to_string()),
+                ("sort".to_string(), "time".to_string()),
+            ];
+            if let Some(cursor) = &after {
+                query.push(("after".to_string(), cursor.clone()));
+            }
 
-        let created_at = DateTime::parse_from_rfc3339(&raw.created_at)
-            .map_err(|_| {
-                format!(
-                    "Twitch returned a VOD with an unreadable start time (\"{}\").",
-                    raw.created_at
-                )
-            })?
-            .with_timezone(&Utc);
+            let response: VideosResponse = self.get_json("/videos", query).await?;
+            let page_len = response.data.len();
+            let mut oldest_end: Option<DateTime<Utc>> = None;
+            for raw in response.data {
+                match vod_from_raw(raw) {
+                    Ok(vod) => {
+                        if let Ok(created) = DateTime::parse_from_rfc3339(&vod.created_at) {
+                            let end = timeshift::evaluate(
+                                fetch_started,
+                                created.with_timezone(&Utc),
+                                vod.duration_seconds,
+                                offset_hours,
+                            )
+                            .sim_end;
+                            oldest_end = Some(end);
+                        }
+                        history.push(vod);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
 
-        let duration_seconds = parse_duration(&raw.duration).ok_or_else(|| {
-            format!(
-                "Twitch returned a VOD with an unreadable duration (\"{}\").",
-                raw.duration
-            )
-        })?;
+            if page_len < VOD_PAGE_SIZE {
+                break;
+            }
+            // Everything older shifted-ends even earlier; once the oldest
+            // window on this page has ended, history is deep enough.
+            if oldest_end.is_some_and(|end| end <= fetch_started) {
+                break;
+            }
+            after = response
+                .pagination
+                .and_then(|p| p.cursor)
+                .filter(|cursor| !cursor.trim().is_empty());
+            if after.is_none() {
+                break;
+            }
+        }
 
-        let vod_id = raw.id;
-        let url = raw
-            .url
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| format!("{VOD_WEB_BASE}/{vod_id}"));
-
-        Ok(Some(VodInfo {
-            title: raw.title.unwrap_or_default(),
-            thumbnail_url: raw
-                .thumbnail_url
-                .filter(|url| !url.trim().is_empty()),
-            created_at: created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
-            duration_seconds,
-            url,
-            id: vod_id,
-        }))
+        Ok(history)
     }
 
-    /// Build the status report entries for the configured streamers, sorted
-    /// per SPEC: live, upcoming, offline, novod, notfound, error; alphabetical
-    /// by login within each group.
-    pub async fn statuses(&self, config: &AppConfig) -> Result<Vec<StreamerStatus>, String> {
+    /// Build the status report entries for the configured streamers.
+    ///
+    /// Returns the entries plus the instant they were classified against —
+    /// a fresh timestamp taken *after* all network requests complete, so a
+    /// slow fetch cannot classify against a stale "now" (BUG_REVIEW #13).
+    /// Order: live, then upcoming by simulated start, then offline, novod,
+    /// notfound, error; alphabetical by login within the remaining groups.
+    pub async fn statuses(
+        &self,
+        config: &AppConfig,
+    ) -> Result<(Vec<StreamerStatus>, DateTime<Utc>), String> {
         let logins = normalize_login_list(&config.streamers);
         if logins.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Utc::now()));
         }
 
         // A credential / token problem is fatal: every streamer would fail the
@@ -332,9 +408,8 @@ impl TwitchClient {
         // streamer becomes an `error` entry instead of killing everything.
         let users = match self.fetch_users(&logins).await {
             Ok(users) => users,
-            Err(error) => return Ok(all_errors(&logins, &error)),
+            Err(error) => return Ok((all_errors(&logins, &error), Utc::now())),
         };
-        let now = Utc::now();
 
         let mut entries: Vec<StreamerStatus> = Vec::with_capacity(logins.len());
         let mut known: Vec<TwitchUser> = Vec::new();
@@ -345,20 +420,26 @@ impl TwitchClient {
             }
         }
 
-        // VOD lookups run concurrently; one failure only affects that streamer.
-        let fetched: Vec<(TwitchUser, Result<Option<VodInfo>, String>)> =
+        // History lookups run concurrently; one failure affects only that streamer.
+        let offset = config.offset_hours;
+        let fetched: Vec<(TwitchUser, Result<Vec<VodInfo>, String>)> =
             stream::iter(known.into_iter().map(|user| async move {
-                let vod = self.fetch_latest_vod(&user.id).await;
-                (user, vod)
+                let history = self.fetch_vod_history(&user.id, offset).await;
+                (user, history)
             }))
             .buffer_unordered(MAX_CONCURRENT_VOD_REQUESTS)
             .collect()
             .await;
 
-        for (user, vod) in fetched {
-            match vod {
-                Ok(Some(vod)) => entries.push(vod_status(&user, vod, now, config.offset_hours)),
-                Ok(None) => entries.push(user_status(&user, StreamerState::Novod)),
+        // Fresh classification instant, after every request has completed.
+        let now = Utc::now();
+
+        for (user, history) in fetched {
+            match history {
+                Ok(vods) if !vods.is_empty() => {
+                    entries.push(history_status(&user, &vods, now, offset))
+                }
+                Ok(_) => entries.push(user_status(&user, StreamerState::Novod)),
                 Err(error) => {
                     let mut status = user_status(&user, StreamerState::Error);
                     status.error = Some(error);
@@ -368,12 +449,18 @@ impl TwitchClient {
         }
 
         entries.sort_by(|a, b| {
-            state_rank(a.state)
-                .cmp(&state_rank(b.state))
-                .then_with(|| a.login.cmp(&b.login))
+            state_rank(a.state).cmp(&state_rank(b.state)).then_with(|| {
+                if a.state == StreamerState::Upcoming {
+                    a.sim_start
+                        .cmp(&b.sim_start)
+                        .then_with(|| a.login.cmp(&b.login))
+                } else {
+                    a.login.cmp(&b.login)
+                }
+            })
         });
 
-        Ok(entries)
+        Ok((entries, now))
     }
 }
 
@@ -382,15 +469,26 @@ impl TwitchClient {
 pub async fn fetch_statuses(
     config: &AppConfig,
     credentials: &Credentials,
-) -> Result<Vec<StreamerStatus>, String> {
+) -> Result<(Vec<StreamerStatus>, DateTime<Utc>), String> {
     shared_client(credentials)?.statuses(config).await
 }
 
-/// Build the locked player URL for a VOD at a join offset.
+/// Documented non-interactive embed URL for a VOD at a join offset.
+///
+/// Per Twitch's embed documentation the `video` parameter must carry a `v`
+/// prefix and `parent` is required. There is **no documented `controls`
+/// parameter** — the player keeps Twitch's own controls; this app never
+/// promised otherwise (BUG_REVIEW #4). Used as the wrapper's fallback; the
+/// primary path is the interactive `Twitch.Player` API in `player.html`.
 pub fn player_url(vod_id: &str, join_seconds: u64) -> String {
+    let id = vod_id.trim();
+    let prefixed = if id.starts_with('v') {
+        id.to_string()
+    } else {
+        format!("v{id}")
+    };
     format!(
-        "{PLAYER_BASE}?video={}&parent={PLAYER_PARENT}&autoplay=true&controls=false&time={}",
-        vod_id.trim(),
+        "{PLAYER_BASE}?video={prefixed}&parent={PLAYER_PARENT}&autoplay=true&time={}",
         format_timestamp(join_seconds)
     )
 }
@@ -406,12 +504,21 @@ pub fn format_timestamp(total_seconds: u64) -> String {
 fn shared_client(credentials: &Credentials) -> Result<Arc<TwitchClient>, String> {
     static SHARED: OnceLock<StdMutex<Option<Arc<TwitchClient>>>> = OnceLock::new();
     let slot = SHARED.get_or_init(|| StdMutex::new(None));
+    client_for(slot, credentials)
+}
+
+/// Reuse the cached client only when the *full* credentials match — a rotated
+/// secret with the same client ID must rebuild the client (BUG_REVIEW #10).
+fn client_for(
+    slot: &StdMutex<Option<Arc<TwitchClient>>>,
+    credentials: &Credentials,
+) -> Result<Arc<TwitchClient>, String> {
     let mut guard = slot
         .lock()
         .map_err(|_| "The Twitch client cache is unusable.".to_string())?;
 
     if let Some(existing) = guard.as_ref() {
-        if existing.client_id == credentials.client_id {
+        if existing.credentials == *credentials {
             return Ok(Arc::clone(existing));
         }
     }
@@ -419,6 +526,75 @@ fn shared_client(credentials: &Credentials) -> Result<Arc<TwitchClient>, String>
     let client = Arc::new(TwitchClient::new(credentials)?);
     *guard = Some(Arc::clone(&client));
     Ok(client)
+}
+
+/// Convert one raw Helix video into a [`VodInfo`].
+fn vod_from_raw(raw: RawVideo) -> Result<VodInfo, String> {
+    let created_at = DateTime::parse_from_rfc3339(&raw.created_at)
+        .map_err(|_| {
+            format!(
+                "Twitch returned a VOD with an unreadable start time (\"{}\").",
+                raw.created_at
+            )
+        })?
+        .with_timezone(&Utc);
+
+    let duration_seconds = parse_duration(&raw.duration).ok_or_else(|| {
+        format!(
+            "Twitch returned a VOD with an unreadable duration (\"{}\").",
+            raw.duration
+        )
+    })?;
+
+    let vod_id = raw.id;
+    let url = raw
+        .url
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| format!("{VOD_WEB_BASE}/{vod_id}"));
+
+    Ok(VodInfo {
+        title: raw.title.unwrap_or_default(),
+        thumbnail_url: raw.thumbnail_url.filter(|url| !url.trim().is_empty()),
+        created_at: created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        duration_seconds,
+        url,
+        id: vod_id,
+    })
+}
+
+/// Build a streamer's status by selecting the relevant broadcast from their
+/// fetched history (active window first — see `timeshift::select_window`).
+fn history_status(
+    user: &TwitchUser,
+    vods: &[VodInfo],
+    now: DateTime<Utc>,
+    offset_hours: f64,
+) -> StreamerStatus {
+    let candidates: Vec<(DateTime<Utc>, u64)> = vods
+        .iter()
+        .filter_map(|vod| {
+            DateTime::parse_from_rfc3339(&vod.created_at)
+                .ok()
+                .map(|dt| (dt.with_timezone(&Utc), vod.duration_seconds))
+        })
+        .collect();
+
+    // Candidates preserve history order (newest first); map the chosen
+    // candidate back to its VOD by matching start + duration.
+    let Some(selection) = timeshift::select_window(&candidates, now, offset_hours) else {
+        return user_status(user, StreamerState::Novod);
+    };
+    let (chosen_start, chosen_duration) = candidates[selection.index];
+    let Some(vod) = vods.iter().find(|vod| {
+        vod.duration_seconds == chosen_duration
+            && DateTime::parse_from_rfc3339(&vod.created_at)
+                .map(|dt| dt.with_timezone(&Utc) == chosen_start)
+                .unwrap_or(false)
+    }) else {
+        return user_status(user, StreamerState::Novod);
+    };
+
+    vod_status(user, vod.clone(), now, offset_hours)
 }
 
 fn normalize_login_list(streamers: &[String]) -> Vec<String> {
@@ -493,7 +669,8 @@ fn vod_status(
     now: DateTime<Utc>,
     offset_hours: f64,
 ) -> StreamerStatus {
-    let Ok(created_at) = DateTime::parse_from_rfc3339(&vod.created_at).map(|dt| dt.with_timezone(&Utc))
+    let Ok(created_at) =
+        DateTime::parse_from_rfc3339(&vod.created_at).map(|dt| dt.with_timezone(&Utc))
     else {
         let mut status = user_status(user, StreamerState::Error);
         status.error = Some("The VOD's start time could not be parsed.".to_string());
@@ -575,25 +752,151 @@ mod tests {
     }
 
     #[test]
-    fn player_url_matches_spec() {
+    fn player_url_uses_documented_v_prefix() {
+        // Twitch embed docs: the video parameter must have a "v" prefix.
         assert_eq!(
             player_url("123456789", 90),
-            "https://player.twitch.tv/?video=123456789&parent=localhost&autoplay=true&controls=false&time=0h1m30s"
+            "https://player.twitch.tv/?video=v123456789&parent=localhost&autoplay=true&time=0h1m30s"
         );
-        // Leading/trailing whitespace in the id is trimmed, big join times keep working.
+        // Already-prefixed ids and whitespace are handled.
         assert_eq!(
-            player_url("  42  ", 7_381),
-            "https://player.twitch.tv/?video=42&parent=localhost&autoplay=true&controls=false&time=2h3m1s"
+            player_url("  v42  ", 7_381),
+            "https://player.twitch.tv/?video=v42&parent=localhost&autoplay=true&time=2h3m1s"
         );
     }
 
     #[test]
-    fn player_url_always_disables_controls_and_autoplays() {
+    fn player_url_has_no_undocumented_controls_param() {
+        // There is no documented `controls` embed parameter; claiming the
+        // player is locked via URL is not supported (BUG_REVIEW #4).
         let url = player_url("1", 0);
-        assert!(url.starts_with("https://player.twitch.tv/?video=1&parent=localhost"));
+        assert!(!url.contains("controls"), "url: {url}");
         assert!(url.contains("autoplay=true"));
-        assert!(url.contains("controls=false"));
         assert!(url.ends_with("&time=0h0m0s"));
+    }
+
+    #[test]
+    fn token_body_parsing_is_explicit() {
+        let (token, ttl) =
+            parse_token_body(r#"{"access_token":"tok","expires_in":3600,"token_type":"bearer"}"#)
+                .expect("valid body");
+        assert_eq!(token, "tok");
+        assert_eq!(ttl, Duration::from_secs(3_600));
+
+        assert!(
+            parse_token_body(r#"{"expires_in":3600}"#).is_err(),
+            "missing token"
+        );
+        assert!(
+            parse_token_body(r#"{"access_token":" ","expires_in":3600}"#).is_err(),
+            "blank token"
+        );
+        assert!(
+            parse_token_body(r#"{"access_token":"tok"}"#).is_err(),
+            "missing expiry"
+        );
+        assert!(
+            parse_token_body(r#"{"access_token":"tok","expires_in":0}"#).is_err(),
+            "zero expiry"
+        );
+        assert!(parse_token_body("not json").is_err(), "garbage");
+    }
+
+    #[test]
+    fn token_lifetimes_never_exceed_true_expiry() {
+        let (usable, hard) = token_lifetimes(Duration::from_secs(3_600));
+        assert_eq!(hard, Duration::from_secs(3_600));
+        assert_eq!(usable, Duration::from_secs(3_540), "60s early refresh");
+
+        // Short-lived tokens: previously floored to 30s+ (past real expiry).
+        let (usable, hard) = token_lifetimes(Duration::from_secs(20));
+        assert_eq!(hard, Duration::from_secs(20));
+        assert_eq!(usable, Duration::from_secs(15));
+        assert!(usable < hard);
+    }
+
+    #[tokio::test]
+    async fn late_401_does_not_clear_refreshed_token() {
+        let credentials = Credentials {
+            client_id: "test-id".to_string(),
+            client_secret: "test-secret".to_string(),
+        };
+        let client = TwitchClient::new(&credentials).expect("client builds");
+        let now = Instant::now();
+        *client.token.lock().await = Some(CachedToken {
+            value: "new-token".to_string(),
+            refresh_after: now + Duration::from_secs(60),
+            expires_at: now + Duration::from_secs(120),
+        });
+
+        // A request that used the OLD token gets a late 401: cache survives.
+        client.invalidate_token("old-token").await;
+        assert_eq!(
+            client.token.lock().await.as_ref().map(|t| t.value.as_str()),
+            Some("new-token")
+        );
+
+        // Invalidating the token actually in use does clear it.
+        client.invalidate_token("new-token").await;
+        assert!(client.token.lock().await.is_none());
+    }
+
+    #[test]
+    fn client_identity_includes_the_secret() {
+        let slot: StdMutex<Option<Arc<TwitchClient>>> = StdMutex::new(None);
+        let base = Credentials {
+            client_id: "same-id".to_string(),
+            client_secret: "secret-one".to_string(),
+        };
+        let rotated = Credentials {
+            client_secret: "secret-two".to_string(),
+            ..base.clone()
+        };
+
+        let first = client_for(&slot, &base).expect("first client");
+        let reused = client_for(&slot, &base).expect("reused client");
+        assert!(Arc::ptr_eq(&first, &reused), "identical credentials reuse");
+
+        let rebuilt = client_for(&slot, &rotated).expect("rebuilt client");
+        assert!(
+            !Arc::ptr_eq(&first, &rebuilt),
+            "rotated secret with same ID must rebuild (BUG_REVIEW #10)"
+        );
+    }
+
+    #[test]
+    fn history_selection_keeps_active_replay() {
+        // BUG_REVIEW #1 regression at the history level: yesterday's 4h
+        // 18:00 stream at +24h is live today 18:00-22:00, even though a
+        // newer VOD exists (newest first, as Helix returns them).
+        let user = TwitchUser {
+            id: "1".to_string(),
+            login: "squeex".to_string(),
+            display_name: "Squeex".to_string(),
+            profile_image_url: None,
+        };
+        let mk = |id: &str, created: &str, duration_seconds: u64| VodInfo {
+            id: id.to_string(),
+            title: format!("VOD {id}"),
+            url: format!("https://www.twitch.tv/videos/{id}"),
+            thumbnail_url: None,
+            created_at: created.to_string(),
+            duration_seconds,
+        };
+        let vods = vec![
+            mk("new", "2024-03-02T19:00:00Z", 3 * 3_600),
+            mk("yesterday", "2024-03-01T18:00:00Z", 4 * 3_600),
+        ];
+        let now = DateTime::parse_from_rfc3339("2024-03-02T19:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let status = history_status(&user, &vods, now, 24.0);
+        assert_eq!(status.state, StreamerState::Live);
+        assert_eq!(
+            status.vod.as_ref().map(|v| v.id.as_str()),
+            Some("yesterday")
+        );
+        assert_eq!(status.join_seconds, Some(5_400));
     }
 
     #[test]
@@ -672,12 +975,7 @@ mod tests {
         assert_eq!(live.sim_end.as_deref(), Some("2024-03-02T13:00:00Z"));
         assert_eq!(live.avatar_url, user.profile_image_url);
 
-        let upcoming = vod_status(
-            &user,
-            vod.clone(),
-            start - chrono::Duration::hours(1),
-            24.0,
-        );
+        let upcoming = vod_status(&user, vod.clone(), start - chrono::Duration::hours(1), 24.0);
         assert_eq!(upcoming.state, StreamerState::Upcoming);
         assert_eq!(upcoming.starts_in_seconds, Some(3_600));
 
@@ -703,6 +1001,9 @@ mod tests {
         assert_eq!(body_preview("   "), "");
         assert_eq!(body_preview(" oops "), " — oops");
         let long = "x".repeat(500);
-        assert_eq!(body_preview(&long).chars().count(), 3 + MAX_ERROR_BODY_CHARS);
+        assert_eq!(
+            body_preview(&long).chars().count(),
+            3 + MAX_ERROR_BODY_CHARS
+        );
     }
 }

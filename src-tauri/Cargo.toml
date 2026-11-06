@@ -1,6 +1,6 @@
 [package]
 name = "twitch-timeshift"
-version = "2.0.0"
+version = "2.0.1"
 description = "Watch Twitch VODs as if they were live in your timezone"
 edition = "2021"
 
@@ -19,5 +19,5 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 futures = "0.3"

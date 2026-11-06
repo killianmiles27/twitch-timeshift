@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Twitch Timeshift",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "identifier": "com.twitchtimeshift.app",
   "build": {
     "frontendDist": "../dist",
@@ -23,12 +23,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self' https://player.twitch.tv; frame-src https://player.twitch.tv; img-src 'self' https://static-cdn.jtvnw.net data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -36,8 +39,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Watch Twitch VODs as if live in your timezone",
-    "longDescription": "Twitch Timeshift replays VODs on a simulated live schedule: pick your timezone and an offset, and VODs start at the same local time the stream originally aired. Join mid-VOD exactly as if you had opened the stream live.",
+    "shortDescription": "Watch Twitch VODs on a delayed, simulated-live schedule",
+    "longDescription": "Twitch Timeshift replays VODs on a simulated schedule: each broadcast is shifted by a fixed delay you choose (for example 24 hours), and you join mid-VOD at the position a live viewer would be at. Times are displayed in your chosen timezone; the delay itself is a fixed number of hours, so local start times move by an hour across daylight-saving changes. The player keeps Twitch's own controls.",
     "category": "Entertainment"
   }
 }

@@ -24,3 +24,12 @@ twitch-secrets.json
 Thumbs.db
 /.vscode/
 /.idea/
+
+# Local app packages, private settings, QA output and nested publish checkout
+/release/
+/public-release/
+/.personal-config.json
+/.qa/
+/.metaveil-tmp/
+*.log
+/src-tauri/gen/

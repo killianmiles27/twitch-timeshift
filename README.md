@@ -1,53 +1,45 @@
 # Twitch Timeshift
 
-**Watch Twitch VODs as if they were live in your timezone.**
+Watch Twitch broadcasts on a delayed, simulated-live schedule. Choose a fixed delay from 0 to 168 hours, add streamers, and open an active replay at its simulated live position. The timezone changes display only. The player keeps Twitch's controls; while playing, drift over 20 seconds is corrected. Pausing is respected.
 
-A streamer goes live at 6 PM in Los Angeles; you are in Berlin and asleep.
-Timeshift replays the VOD on a simulated schedule: pick your timezone and a
-delay (say +24 h), and the VOD "starts" at the same local time it originally
-aired. Open the app mid-window and you join the VOD at exactly the position a
-live viewer would be at — in a locked player with no scrubbing and no
-spoilers.
+## Windows portable app
 
-Rebuilt from scratch in **Rust + Tauri v2** (the original was an Electron
-prototype). Only the idea carried over.
+Extract the portable ZIP and double-click **Twitch Timeshift.exe**. Move the entire folder to your Apps folder. A `portable.txt` marker stores settings in `data/config.json` beside the executable. Keep the folder writable. Windows WebView2 Runtime is required.
 
-## How it works
+Public packages contain no credentials, followed streamers, or personal settings. Register your own application at the [Twitch developer console](https://dev.twitch.tv/console), then place `twitch-secrets.json` beside the executable:
 
-1. Add the streamers you follow.
-2. For each, the app fetches the latest VOD from the Twitch API and shifts its
-   start by your offset: simulated window = `[vodStart + offset, + duration]`.
-3. Streamers sort into **On air now** (join mid-VOD at the live position),
-   **Starting soon** (countdown to the simulated start), and **Off air**.
-4. **Watch** opens the Twitch player locked at the live position — no
-   controls, no timeline, just the stream as it "airs".
-
-## Setup
-
-Download the latest release, run the installer, done. The app ships with its
-Twitch API registration built in — no accounts, no keys, no config files.
-
-Settings (streamers, timezone, offset) save automatically to
-`config.json` in the app config directory. Offsets from +0 h to +168 h;
-presets at +0/+9/+12/+24/+33/+48 h.
-
-## Development
-
-Prereqs: Rust (MSVC), Node 20+, WebView2 (Windows).
-
-```powershell
-npm install
-npx tauri dev        # dev run (reads .twitch-secrets.json from repo root if present)
-cargo test --manifest-path src-tauri/Cargo.toml
-.\scripts\build-release.ps1   # release installers in src-tauri/target/release/bundle
+```json
+{"clientId":"YOUR_CLIENT_ID","clientSecret":"YOUR_CLIENT_SECRET"}
 ```
 
-Credentials resolve in order: `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET` env
-vars → `twitch-secrets.json` beside the app or in the config dir →
-compile-time embedded (release builds). See `SPEC.md` for the full contract
-and `credentials.rs` for the implementation. Secrets are never committed:
-`.twitch-secrets.json` is gitignored.
+Alternatively set `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`, or use `TWITCH_SECRETS_FILE`. Credentials are read at runtime and never compiled into the executable. Keep your credentials private. Click Refresh after changing them.
 
-## License
+NSIS and MSI installers are also supported. Installed apps without a portable marker store settings in the normal OS app config directory.
 
-See `LICENSE` in this repository.
+## Recovery
+
+- Missing/rejected credentials: correct the file and press Refresh.
+- Network failure: the previous schedule stays visible and is marked stale; initial failures offer Retry.
+- Corrupt settings: the original is kept as `config.json.bak`; defaults are shown with a warning. Missing fields are migrated individually.
+- Playback blocked: Twitch may require a user gesture, login, or access to a restricted VOD. Retry playback or open the video on Twitch.
+- Delay changes: open players receive the new schedule; a replay moved outside its window pauses.
+
+## Development and packaging
+
+Requires Node 22+, Rust MSVC, and Windows WebView2.
+
+```powershell
+npm ci
+npm test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1
+powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Installers
+```
+
+The output is `release/Twitch Timeshift`. For a private portable folder, put your key in the gitignored `.twitch-secrets.json` and optionally seed settings using `.personal-config.json`, then pass `-Personal`. Only that private output receives these files. Never share it. `-SkipBuild` packages an already-built executable.
+
+Earlier v2.0.0 release binaries embedded credentials. The owner of that registration should rotate its secret in the Twitch console; a new build cannot revoke an old binary's key.
+
+See [SPEC.md](SPEC.md) for scheduling and API details, and [LICENSE](LICENSE).

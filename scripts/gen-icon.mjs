@@ -1,7 +1,12 @@
 // Generates assets/icon-512.png: flat violet rounded square, white clock
 // ring + hands, red "live" dot. No external deps (node:zlib only).
+// Output resolves relative to this script, not the caller's CWD.
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const S = 512;
 const px = new Uint8Array(S * S * 4);
@@ -83,6 +88,8 @@ const png = Buffer.concat([
   chunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
   chunk('IEND', Buffer.alloc(0)),
 ]);
-fs.mkdirSync('assets', { recursive: true });
-fs.writeFileSync('assets/icon-512.png', png);
-console.log('wrote assets/icon-512.png', png.length, 'bytes');
+const outDir = path.join(projectRoot, 'assets');
+fs.mkdirSync(outDir, { recursive: true });
+const outFile = path.join(outDir, 'icon-512.png');
+fs.writeFileSync(outFile, png);
+console.log('wrote', outFile, png.length, 'bytes');

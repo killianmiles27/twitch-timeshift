@@ -5,10 +5,8 @@
 //! 2. A secrets JSON file `{ "clientId": "...", "clientSecret": "..." }`
 //!    (snake_case keys also accepted) found in the app config dir, next to
 //!    the executable, or in the current working directory (dev).
-//! 3. Compile-time `option_env!("TWITCH_CLIENT_ID")` /
-//!    `option_env!("TWITCH_CLIENT_SECRET")` (release builds via
-//!    `scripts/build-release.ps1`, which loads the gitignored
-//!    `.twitch-secrets.json` into the environment without printing it).
+//!
+//! No credentials are embedded at compile time.
 //!
 //! Values are never logged, returned to the frontend, or put in errors.
 
@@ -33,15 +31,9 @@ fn from_env() -> Option<Credentials> {
     })
 }
 
-fn from_compile_time() -> Option<Credentials> {
-    Some(Credentials {
-        client_id: non_empty(option_env!("TWITCH_CLIENT_ID").map(str::to_string))?,
-        client_secret: non_empty(option_env!("TWITCH_CLIENT_SECRET").map(str::to_string))?,
-    })
-}
-
 fn parse_secrets_json(text: &str) -> Option<Credentials> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let value: serde_json::Value =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     let get = |keys: [&str; 2]| -> Option<String> {
         keys.iter()
             .find_map(|k| value.get(k).and_then(|v| v.as_str()))
@@ -94,17 +86,13 @@ pub fn source(app_config_dir: Option<&Path>) -> &'static str {
         "environment"
     } else if from_file(app_config_dir).is_some() {
         "file"
-    } else if from_compile_time().is_some() {
-        "embedded"
     } else {
         "missing"
     }
 }
 
 pub fn load(app_config_dir: Option<&Path>) -> Option<Credentials> {
-    from_env()
-        .or_else(|| from_file(app_config_dir))
-        .or_else(from_compile_time)
+    from_env().or_else(|| from_file(app_config_dir))
 }
 
 pub fn status(app_config_dir: Option<&Path>) -> CredentialsStatus {
@@ -112,6 +100,9 @@ pub fn status(app_config_dir: Option<&Path>) -> CredentialsStatus {
     CredentialsStatus {
         configured: source != "missing",
         source: source.to_string(),
+        // Acceptance by Twitch is only known after a successful API call;
+        // the frontend tracks that. "Configured" is never "authenticated".
+        authenticated: false,
     }
 }
 
@@ -125,6 +116,14 @@ mod tests {
             .expect("camelCase secrets should parse");
         assert_eq!(creds.client_id, "abc");
         assert_eq!(creds.client_secret, "def");
+    }
+
+    #[test]
+    fn parses_windows_utf8_bom() {
+        assert!(
+            parse_secrets_json("\u{feff}{\"clientId\":\"example\",\"clientSecret\":\"test\"}")
+                .is_some()
+        );
     }
 
     #[test]

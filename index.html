@@ -38,19 +38,27 @@
           <select id="timezoneSelect"></select>
         </label>
         <div class="field">
-          <span class="field-label" id="offsetLabel">Delay after original air time</span>
+          <span class="field-label" id="offsetLabel">Replay delay (fixed hours)</span>
           <div class="offset-row" role="group" aria-labelledby="offsetLabel">
             <div id="offsetPresets" class="segmented"></div>
             <label class="offset-custom">
-              <input id="offsetCustom" type="number" min="0" max="168" step="1" />
+              <input id="offsetCustom" type="number" min="0" max="168" step="0.5" aria-label="Custom delay in hours" />
               <span>hrs</span>
             </label>
           </div>
+          <p id="offsetError" class="add-error" role="alert" hidden></p>
         </div>
         <p id="lastUpdated" class="last-updated" aria-live="polite"></p>
       </section>
 
-      <p id="errorBanner" class="error-banner" hidden></p>
+      <p id="errorBanner" class="error-banner" role="alert" hidden></p>
+      <p id="playerStatus" class="player-status" aria-live="polite" hidden></p>
+
+      <section id="firstRun" class="first-run" hidden>
+        <h2>No streamers yet</h2>
+        <p>Add the Twitch streamers you follow, and this page will show which of their past broadcasts are replaying right now on your delayed schedule.</p>
+        <button id="firstRunAdd" class="btn btn-primary" type="button">Add streamers</button>
+      </section>
 
       <main id="sections">
         <section class="slot" aria-labelledby="liveHeading">
@@ -71,24 +79,25 @@
       </main>
 
       <footer class="appfoot">
-        <p>Player opens locked at the live position — no scrubbing, no spoilers. Times shown in <span id="footTz">your timezone</span>.</p>
+        <p>Watch opens the VOD at the simulated live position and keeps it in sync; Twitch keeps its own player controls (timeline, volume, fullscreen), so treat the position as a live join, not a lock. The delay is a fixed number of hours — across daylight-saving changes the local start time shifts by an hour. Times shown in <span id="footTz">your timezone</span>.</p>
       </footer>
     </div>
 
-    <dialog id="managerDialog" class="manager">
+    <dialog id="managerDialog" class="manager" aria-labelledby="managerTitle">
       <form method="dialog" class="manager-card">
         <header class="manager-head">
-          <h2>Streamers</h2>
+          <h2 id="managerTitle">Streamers</h2>
           <button class="icon-btn" value="cancel" aria-label="Close" type="submit">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </header>
         <p class="manager-hint">Twitch usernames, one at a time. Changes save automatically.</p>
         <div class="add-row">
+          <label class="visually-hidden" for="addInput">Twitch username to add</label>
           <input id="addInput" type="text" placeholder="e.g. squeex" autocomplete="off" spellcheck="false" />
           <button id="addBtn" class="btn btn-primary" type="button">Add</button>
         </div>
-        <p id="addError" class="add-error" hidden></p>
+        <p id="addError" class="add-error" role="alert" hidden></p>
         <ul id="managerList" class="manager-list"></ul>
       </form>
     </dialog>

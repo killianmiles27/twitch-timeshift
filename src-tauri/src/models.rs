@@ -72,4 +72,29 @@ pub struct CredentialsStatus {
     pub configured: bool,
     /// One of: "environment", "file", "embedded", "missing".
     pub source: String,
+    /// Whether Twitch has accepted these credentials in this session.
+    /// `configured` alone does not prove that (BUG_REVIEW #16); the backend
+    /// reports `false` and the frontend flips it after a successful report.
+    pub authenticated: bool,
+}
+
+/// Result of loading the persisted config (BUG_REVIEW #12).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigLoad {
+    pub config: AppConfig,
+    /// No config file existed: defaults are a starting point, not a reset.
+    pub first_launch: bool,
+    /// An existing file could not be used as-is (corrupt/unreadable); a
+    /// backup was kept next to it and `warning` explains what happened.
+    pub recovered: bool,
+    pub warning: Option<String>,
+}
+
+/// Returned by `open_player`: the backend-computed authoritative position.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPlayerResult {
+    pub vod_id: String,
+    pub join_seconds: u64,
 }
