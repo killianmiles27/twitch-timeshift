@@ -4,10 +4,23 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
     if (-not $SkipBuild) {
+        # Keep local Windows usernames and dependency paths out of binaries.
+        # Encoded flags preserve profile paths that contain spaces.
+        $previousEncodedFlags = $env:CARGO_ENCODED_RUSTFLAGS
+        $separator = [char]31
+        $buildFlags = if ($previousEncodedFlags) { $previousEncodedFlags } else { ($env:RUSTFLAGS -split '\s+' | Where-Object { $_ }) -join $separator }
+        $profileRoot = [Environment]::GetFolderPath('UserProfile')
+        $remap = '--remap-path-prefix=' + $profileRoot + '=/build'
+        $env:CARGO_ENCODED_RUSTFLAGS = if ($buildFlags) { $buildFlags + $separator + $remap } else { $remap }
         $tauriArgs = @('node_modules/@tauri-apps/cli/tauri.js', 'build')
         if (-not $Installers) { $tauriArgs += '--no-bundle' }
-        & node @tauriArgs
-        if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+        try {
+            & node @tauriArgs
+            if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+        } finally {
+            if ($null -eq $previousEncodedFlags) { Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue }
+            else { $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedFlags }
+        }
     }
     $name = if ($Personal) { 'Twitch Timeshift Personal' } else { 'Twitch Timeshift' }
     $dest = Join-Path $projectRoot "release/$name"

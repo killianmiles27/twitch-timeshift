@@ -25,7 +25,7 @@ The release executable was launched with a temporary local WebView2 debugging po
 
 ## Packaging and privacy
 
-Portable executable, NSIS installer and MSI installer built successfully. Source and public binaries were scanned against local credential values; none were present. Personal followed-streamer defaults were removed from the public app. Private credentials and settings are confined to the ignored personal package; public packages use the same credential-free executable.
+Portable executable, NSIS installer and MSI installer built successfully. Source and public binaries were scanned against local credential values; none were present. Release builds remap local user-profile paths to a neutral build path. Personal followed-streamer defaults were removed from the public app. Private credentials and settings are confined to the ignored personal package; public packages use the same credential-free executable.
 
 Installer installation/uninstallation, physical sleep/resume, a screen reader, and every Twitch restriction/login scenario were not tested. Public playback requires the recipient's own valid Twitch credentials and an available VOD. WebView2 Runtime is required. Supported Twitch controls remain available; this app does not lock the timeline. The basic iframe fallback cannot maintain live sync.
 
