@@ -1,88 +1,53 @@
-# Twichtimeshift2
+# Twitch Timeshift
 
-**Twichtimeshift2** is a powerful Electron desktop app that lets you watch Twitch VODs as if you were watching them live — adjusted to your local time and offset preferences. Built over many iterations with core contributions from Killian Miles and development assistance from ChatGPT.
+**Watch Twitch VODs as if they were live in your timezone.**
 
----
+A streamer goes live at 6 PM in Los Angeles; you are in Berlin and asleep.
+Timeshift replays the VOD on a simulated schedule: pick your timezone and a
+delay (say +24 h), and the VOD "starts" at the same local time it originally
+aired. Open the app mid-window and you join the VOD at exactly the position a
+live viewer would be at — in a locked player with no scrubbing and no
+spoilers.
 
-## What It Does
+Rebuilt from scratch in **Rust + Tauri v2** (the original was an Electron
+prototype). Only the idea carried over.
 
-Twichtimeshift2:
-- Syncs Twitch VODs to your **local time** as if the stream started at the same hour in your timezone
-- Lets you **choose your timezone** (Berlin, New York, Tokyo, etc.)
-- Lets you apply a **time offset** (like +24 hours) so streams play exactly when you want them
-- Automatically calculates how far into the VOD you are based on current time
-- Opens the stream in a **locked Twitch player** (no scrubbing, no rewinding)
-- Splits streamers into **Online** vs **Offline** with accurate start/end time info
-- Lets you **add and remove streamers** via a simple popup menu
-- Includes a **custom icon** (time-traveling capybara)
-- Fully GUI-powered — no command line needed
+## How it works
 
----
+1. Add the streamers you follow.
+2. For each, the app fetches the latest VOD from the Twitch API and shifts its
+   start by your offset: simulated window = `[vodStart + offset, + duration]`.
+3. Streamers sort into **On air now** (join mid-VOD at the live position),
+   **Starting soon** (countdown to the simulated start), and **Off air**.
+4. **Watch** opens the Twitch player locked at the live position — no
+   controls, no timeline, just the stream as it "airs".
 
-##  Why It Was Created
+## Setup
 
-Like many Twitch fans, I was frustrated living in a different timezone from my favorite streamers. Streams often started while I was sleeping or busy, and catching up later never felt right — the experience was disconnected and full of spoilers.
+Download the latest release, run the installer, done. The app ships with its
+Twitch API registration built in — no accounts, no keys, no config files.
 
-So I built Twichtimeshift2 to bring the live stream feel back — by syncing VODs to your local time as if they just started.
+Settings (streamers, timezone, offset) save automatically to
+`config.json` in the app config directory. Offsets from +0 h to +168 h;
+presets at +0/+9/+12/+24/+33/+48 h.
 
-### Example Use Case:
-A streamer goes live at **6 PM in Los Angeles**, but you live in **Berlin**. You use Twichtimeshift2 to simulate that stream starting at **6 PM Berlin time** the next day. If you open the app at **7:30 PM**, the VOD starts playing **90 minutes in**, just like a live experience synced to your day.
+## Development
 
----
+Prereqs: Rust (MSVC), Node 20+, WebView2 (Windows).
 
-##  How It Works
+```powershell
+npm install
+npx tauri dev        # dev run (reads .twitch-secrets.json from repo root if present)
+cargo test --manifest-path src-tauri/Cargo.toml
+.\scripts\build-release.ps1   # release installers in src-tauri/target/release/bundle
+```
 
-1. The app checks your selected streamers using the Twitch API
-2. It pulls their most recent VOD and finds the original **stream start time**
-3. Converts that time into your **selected timezone**
-4. Applies your chosen **hour offset** (e.g., +24 hours) to simulate delayed playback
-5. If the current time is **within the simulated stream window**, it shows as ONLINE
-6. Click “Watch” to open the embedded Twitch player at the correct timestamp
+Credentials resolve in order: `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET` env
+vars → `twitch-secrets.json` beside the app or in the config dir →
+compile-time embedded (release builds). See `SPEC.md` for the full contract
+and `credentials.rs` for the implementation. Secrets are never committed:
+`.twitch-secrets.json` is gitignored.
 
----
+## License
 
-##  How to Use
-
-### Setup Instructions
-
-1. Download the `.7z` release file from the project’s GitHub Releases page
-2. Extract it using [7-Zip](https://www.7-zip.org/)
-3. Inside the extracted folder, run:
-   ```
-   Twichtimeshift2.exe
-   ```
-
-That’s it! No installation or setup needed. Your config will auto-save locally.
-
----
-
-##  GUI Features
-
-- Dropdowns for:
-  - Major timezones
-  - Offset options: `+0`, `+9`, `+12`, `+24`, `+33`
-- Buttons:
-  - “Refresh” to check stream status
-  - “Add/Remove Streamers” opens a simple editor
-- Auto-saves all settings in `config.json`
-
----
-
-##  Versions & Iteration History
-
-This app was developed across 20+ iterations, including:
-- Fixing timezone logic
-- Adding proper offset control
-- Alphabetical sorting of streamers
-- Adding/removing streamers dynamically
-- Custom icon generation
-- Full GUI redesign
-
----
-
-##  License
-
-This project is licensed under **CC BY-NC-ND 4.0**  
-Commercial use, redistribution, or modification of this app is not allowed.
-
----
+See `LICENSE` in this repository.

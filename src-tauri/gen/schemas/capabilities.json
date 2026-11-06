@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window permissions: core invoke only. The player window is created from Rust.","local":true,"windows":["main","player-*"],"permissions":["core:default"]}}

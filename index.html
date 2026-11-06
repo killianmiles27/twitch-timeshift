@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Twitch Timeshift</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="appbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+            <rect width="48" height="48" rx="11" fill="#7C3AED"/>
+            <circle cx="23" cy="23" r="12.5" fill="none" stroke="#fff" stroke-width="3.4"/>
+            <path d="M23 23 L17.5 16.5 M23 23 L29.5 20" stroke="#fff" stroke-width="3.4" stroke-linecap="round"/>
+            <circle cx="23" cy="23" r="2.2" fill="#fff"/>
+            <circle cx="31.8" cy="31.8" r="4.6" fill="#EB0400" stroke="#fff" stroke-width="2"/>
+          </svg>
+          <div class="brand-text">
+            <h1>Twitch Timeshift</h1>
+            <p>VODs, replayed as if live</p>
+          </div>
+        </div>
+        <div class="appbar-actions">
+          <span id="credBadge" class="cred-badge" title="Twitch API credentials">API: …</span>
+          <button id="refreshBtn" class="btn btn-ghost" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 3v4h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Refresh
+          </button>
+          <button id="manageBtn" class="btn btn-primary" type="button">Streamers</button>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Timeshift controls">
+        <label class="field">
+          <span class="field-label">Your timezone</span>
+          <select id="timezoneSelect"></select>
+        </label>
+        <div class="field">
+          <span class="field-label" id="offsetLabel">Delay after original air time</span>
+          <div class="offset-row" role="group" aria-labelledby="offsetLabel">
+            <div id="offsetPresets" class="segmented"></div>
+            <label class="offset-custom">
+              <input id="offsetCustom" type="number" min="0" max="168" step="1" />
+              <span>hrs</span>
+            </label>
+          </div>
+        </div>
+        <p id="lastUpdated" class="last-updated" aria-live="polite"></p>
+      </section>
+
+      <p id="errorBanner" class="error-banner" hidden></p>
+
+      <main id="sections">
+        <section class="slot" aria-labelledby="liveHeading">
+          <h2 id="liveHeading" class="slot-title"><span class="dot dot-live"></span>On air now</h2>
+          <div id="liveList" class="card-grid"></div>
+          <p class="empty-note" data-empty-for="liveList" hidden>Nothing is inside its simulated live window right now.</p>
+        </section>
+        <section class="slot" aria-labelledby="soonHeading">
+          <h2 id="soonHeading" class="slot-title"><span class="dot dot-soon"></span>Starting soon</h2>
+          <div id="soonList" class="card-grid"></div>
+          <p class="empty-note" data-empty-for="soonList" hidden>No upcoming simulated starts.</p>
+        </section>
+        <section class="slot" aria-labelledby="offHeading">
+          <h2 id="offHeading" class="slot-title"><span class="dot dot-off"></span>Off air</h2>
+          <div id="offList" class="row-list"></div>
+          <p class="empty-note" data-empty-for="offList" hidden>Everyone is accounted for above.</p>
+        </section>
+      </main>
+
+      <footer class="appfoot">
+        <p>Player opens locked at the live position — no scrubbing, no spoilers. Times shown in <span id="footTz">your timezone</span>.</p>
+      </footer>
+    </div>
+
+    <dialog id="managerDialog" class="manager">
+      <form method="dialog" class="manager-card">
+        <header class="manager-head">
+          <h2>Streamers</h2>
+          <button class="icon-btn" value="cancel" aria-label="Close" type="submit">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </header>
+        <p class="manager-hint">Twitch usernames, one at a time. Changes save automatically.</p>
+        <div class="add-row">
+          <input id="addInput" type="text" placeholder="e.g. squeex" autocomplete="off" spellcheck="false" />
+          <button id="addBtn" class="btn btn-primary" type="button">Add</button>
+        </div>
+        <p id="addError" class="add-error" hidden></p>
+        <ul id="managerList" class="manager-list"></ul>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

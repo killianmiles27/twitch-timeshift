@@ -1,0 +1,26 @@
+# secrets — never commit
+.twitch-secrets.json
+twitch-secrets.json
+
+# rust
+/src-tauri/target/
+
+# node / vite
+/node_modules/
+/dist/
+
+# old-app recovery artifacts (local only)
+/old-extract/
+/old-release.7z
+/repos.json
+/twitch-repo.json
+/agent-context.json
+/probe-*.mjs
+/carry-over-creds.mjs
+/check-env.ps1
+
+# os / editors
+.DS_Store
+Thumbs.db
+/.vscode/
+/.idea/
