@@ -11,5 +11,11 @@ export default defineConfig({
     target: "es2022",
     minify: "esbuild",
     sourcemap: false,
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        player: "player.html",
+      },
+    },
   },
 });

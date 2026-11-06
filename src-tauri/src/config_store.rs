@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use chrono_tz::{Tz, TZ_VARIANTS};
 
-use crate::models::AppConfig;
+use crate::models::{AppConfig, ConfigLoad};
 use crate::timeshift::MAX_OFFSET_HOURS;
 
 /// File name of the persisted config inside the app config directory.
@@ -29,25 +29,15 @@ pub const MAX_AUTO_REFRESH_SECONDS: u32 = 3_600;
 pub const MIN_LOGIN_LENGTH: usize = 3;
 pub const MAX_LOGIN_LENGTH: usize = 25;
 
-/// The followed streamers carried over from the Electron app (SPEC.md §Defaults).
-pub const MIGRATED_STREAMERS: [&str; 12] = [
-    "squeex",
-    "ludwig",
-    "qtcinderella",
-    "hasanabi",
-    "stanz",
-    "jaysontheween",
-    "willneff",
-    "extraemily",
-    "cinna",
-    "slimeirl",
-    "linustech",
-    "kai_cenat",
-];
-
-/// The migrated streamer list as owned strings.
+/// New installations start without anyone else's personal follows.
 pub fn default_streamers() -> Vec<String> {
-    MIGRATED_STREAMERS.iter().map(|s| (*s).to_string()).collect()
+    Vec::new()
+}
+
+/// A marker beside the executable makes settings travel with a portable app.
+pub fn portable_config_dir(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.join("portable.txt").is_file().then(|| dir.join("data"))
 }
 
 /// Parse an IANA timezone name, tolerating different casing.
@@ -174,15 +164,117 @@ pub fn config_path(config_dir: &Path) -> PathBuf {
     config_dir.join(CONFIG_FILE_NAME)
 }
 
-/// Load the config, falling back to defaults for missing or corrupt files.
+/// Load the config for internal use.
 pub fn load_config(config_dir: &Path) -> AppConfig {
+    load_config_detailed(config_dir).config
+}
+
+/// Load the config, distinguishing first launch, healthy loads, migration of
+/// partial/older files, and corrupt data (BUG_REVIEW #12).
+///
+/// A corrupt or unreadable existing file is copied to `config.json.bak`
+/// (best effort) and reported via `warning`; the original file is left in
+/// place until the next successful save, so nothing is silently destroyed.
+pub fn load_config_detailed(config_dir: &Path) -> ConfigLoad {
     let path = config_path(config_dir);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return default_config();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ConfigLoad {
+                config: default_config(),
+                first_launch: true,
+                recovered: false,
+                warning: None,
+            };
+        }
+        Err(error) => {
+            return ConfigLoad {
+                config: default_config(),
+                first_launch: false,
+                recovered: true,
+                warning: Some(format!(
+                    "Your settings file could not be read ({error}). Defaults are shown; \
+                     your streamers were not changed on disk."
+                )),
+            };
+        }
     };
-    match serde_json::from_str::<AppConfig>(&text) {
-        Ok(config) => normalize_config(config),
-        Err(_) => default_config(),
+
+    let value: serde_json::Value =
+        match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+            Ok(value) if value.is_object() => value,
+            _ => {
+                let backup = backup_corrupt_file(config_dir);
+                return ConfigLoad {
+                    config: default_config(),
+                    first_launch: false,
+                    recovered: true,
+                    warning: Some(format!(
+                    "Your settings file was corrupt and could not be used. Defaults are shown. \
+                     The original was preserved as {backup}."
+                )),
+                };
+            }
+        };
+
+    ConfigLoad {
+        config: migrate_config(&value),
+        first_launch: false,
+        recovered: false,
+        warning: None,
+    }
+}
+
+/// Per-field migration: every present field is honored, every missing or
+/// mistyped field falls back individually — one absent setting never discards
+/// the user's streamer list (BUG_REVIEW #12).
+pub fn migrate_config(value: &serde_json::Value) -> AppConfig {
+    let defaults = default_config();
+    let streamers = value
+        .get("streamers")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            normalize_streamers(
+                &items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or(defaults.streamers);
+    let timezone = value
+        .get("timezone")
+        .and_then(|v| v.as_str())
+        .map(normalize_timezone)
+        .unwrap_or(defaults.timezone);
+    let offset_hours = value
+        .get("offsetHours")
+        .and_then(|v| v.as_f64())
+        .map(normalize_offset_hours)
+        .unwrap_or(defaults.offset_hours);
+    let auto_refresh_seconds = value
+        .get("autoRefreshSeconds")
+        .and_then(|v| v.as_u64())
+        .map(|v| normalize_auto_refresh_seconds(u32::try_from(v).unwrap_or(u32::MAX)))
+        .unwrap_or(defaults.auto_refresh_seconds);
+
+    AppConfig {
+        streamers,
+        timezone,
+        offset_hours,
+        auto_refresh_seconds,
+    }
+}
+
+/// Copy a corrupt config to `config.json.bak`; returns a display name.
+fn backup_corrupt_file(config_dir: &Path) -> String {
+    let backup_path = config_dir.join(format!("{CONFIG_FILE_NAME}.bak"));
+    match fs::copy(config_path(config_dir), &backup_path) {
+        Ok(_) => backup_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "config.json.bak".to_string()),
+        Err(_) => "a backup could not be written".to_string(),
     }
 }
 
@@ -232,6 +324,28 @@ pub fn save_config(config_dir: &Path, config: &AppConfig) -> Result<AppConfig, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_marker_selects_data_beside_executable() {
+        let dir = test_dir("portable");
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("app.exe");
+        assert_eq!(portable_config_dir(&exe), None);
+        fs::write(dir.join("portable.txt"), "portable").unwrap();
+        assert_eq!(portable_config_dir(&exe), Some(dir.join("data")));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn windows_utf8_bom_settings_are_accepted() {
+        let dir = test_dir("bom");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(config_path(&dir), "\u{feff}{\"streamers\":[\"example\"]}").unwrap();
+        let loaded = load_config_detailed(&dir);
+        assert!(!loaded.recovered);
+        assert_eq!(loaded.config.streamers, vec!["example"]);
+        cleanup(&dir);
+    }
 
     fn test_dir(tag: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -338,9 +452,7 @@ mod tests {
     fn default_config_matches_spec() {
         let config = default_config();
         assert_eq!(config.streamers, default_streamers());
-        assert_eq!(config.streamers.len(), 12);
-        assert_eq!(config.streamers[0], "squeex");
-        assert_eq!(config.streamers[11], "kai_cenat");
+        assert!(config.streamers.is_empty());
         assert!(config.streamers.iter().all(|login| is_valid_login(login)));
         assert_eq!(config.offset_hours, 24.0);
         assert_eq!(config.auto_refresh_seconds, 60);
@@ -358,6 +470,81 @@ mod tests {
 
         fs::write(config_path(&dir), b"{\"streamers\":42}").unwrap();
         assert_eq!(load_config(&dir), default_config());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn partial_config_migrates_without_losing_streamers() {
+        // BUG_REVIEW #12 regression: an older config missing newer fields
+        // must keep the user's list.
+        let dir = test_dir("migrate");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            config_path(&dir),
+            br#"{"streamers":["MyStreamer","other_one"],"timezone":"America/New_York"}"#,
+        )
+        .unwrap();
+
+        let load = load_config_detailed(&dir);
+        assert!(!load.first_launch);
+        assert!(!load.recovered);
+        assert_eq!(load.config.streamers, vec!["mystreamer", "other_one"]);
+        assert_eq!(load.config.timezone, "America/New_York");
+        assert_eq!(load.config.offset_hours, DEFAULT_OFFSET_HOURS);
+        assert_eq!(
+            load.config.auto_refresh_seconds,
+            DEFAULT_AUTO_REFRESH_SECONDS
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_and_reported() {
+        let dir = test_dir("corrupt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(config_path(&dir), b"{ not json !!").unwrap();
+
+        let load = load_config_detailed(&dir);
+        assert!(!load.first_launch);
+        assert!(load.recovered, "corruption must be reported, not silent");
+        assert!(load.warning.is_some());
+        // Original preserved as backup; untouched original remains in place.
+        let backup = dir.join(format!("{CONFIG_FILE_NAME}.bak"));
+        assert_eq!(fs::read(&backup).unwrap(), b"{ not json !!");
+        assert_eq!(
+            fs::read(config_path(&dir)).unwrap(),
+            b"{ not json !!",
+            "load must not overwrite the recoverable original"
+        );
+
+        cleanup(&dir);
+        let _ = fs::remove_file(backup);
+    }
+
+    #[test]
+    fn first_launch_is_distinguished() {
+        let dir = test_dir("first-launch");
+        let load = load_config_detailed(&dir);
+        assert!(load.first_launch);
+        assert!(!load.recovered);
+        assert!(load.warning.is_none());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn replacement_save_overwrites_existing_file() {
+        // Windows rename-replace semantics: saving over an existing
+        // config.json must succeed, not only the first write (BUG_REVIEW #5).
+        let dir = test_dir("replace");
+        let first = config_with(&["squeex"], "UTC", 24.0, 60);
+        save_config(&dir, &first).expect("first save");
+
+        let second = config_with(&["ludwig"], "Europe/Berlin", 48.0, 0);
+        let saved = save_config(&dir, &second).expect("replacement save on Windows");
+        assert_eq!(load_config(&dir), saved);
+        assert_eq!(saved.streamers, vec!["ludwig"]);
 
         cleanup(&dir);
     }

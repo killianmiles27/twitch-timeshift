@@ -5,7 +5,7 @@
   --line: #26262f;
   --text: #ededf0;
   --muted: #a9a9b4;
-  --faint: #6e6e78;
+  --faint: #a2a2ae;
   --accent: #7c3aed;
   --accent-hover: #8b4ff0;
   --accent-ink: #ffffff;
@@ -209,6 +209,41 @@ select { min-width: 230px; }
 }
 .manager-list li:first-child { border-top: 0; }
 .manager-list .remove-btn { margin-left: auto; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  clip-path: inset(50%); overflow: hidden; white-space: nowrap;
+}
+
+.player-status {
+  margin: 10px 0 0; padding: 9px 13px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12.5px; font-family: var(--mono);
+}
+.player-status.failed, .player-status.blocked {
+  background: #2a1512; border-color: #5a2623; color: #ffb4ac;
+}
+
+.first-run {
+  margin-top: 26px; padding: 26px; text-align: center;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+.first-run h2 { margin: 0 0 8px; font-size: 17px; }
+.first-run p { color: var(--muted); max-width: 52ch; margin: 0 auto 16px; }
+
+.failed-panel {
+  padding: 22px; text-align: center;
+  background: var(--panel); border: 1px solid #5a2623; border-radius: var(--radius-card);
+}
+.failed-panel h3 { margin: 0 0 6px; font-size: 15px; }
+.failed-panel p { color: var(--muted); margin: 0 auto 14px; max-width: 52ch; }
+
+.stale-tag {
+  font: 700 10.5px var(--font); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--soon); border: 1px solid #5c4a1c; background: #3a2f14;
+  border-radius: 999px; padding: 3px 9px; margin-left: 8px;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .btn .spin, .skeleton .sk { animation: none; }

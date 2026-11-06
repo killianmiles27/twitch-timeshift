@@ -58,7 +58,12 @@ pub fn parse_duration(value: &str) -> Option<u64> {
 
     for ch in text.chars() {
         if let Some(digit) = ch.to_digit(10) {
-            number = Some(number.unwrap_or(0).checked_mul(10)?.checked_add(digit as u64)?);
+            number = Some(
+                number
+                    .unwrap_or(0)
+                    .checked_mul(10)?
+                    .checked_add(digit as u64)?,
+            );
             continue;
         }
 
@@ -164,6 +169,77 @@ pub fn evaluate(
             progress: None,
         }
     }
+}
+
+/// A chosen candidate plus its evaluated window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSelection {
+    /// Index into the `candidates` slice passed to [`select_window`].
+    pub index: usize,
+    pub evaluation: Evaluation,
+}
+
+/// Choose which broadcast a streamer card should show.
+///
+/// Candidates are `(real start, duration seconds)` pairs in any order.
+/// Selection is deterministic:
+///
+/// 1. A currently **live** shifted window beats everything. Overlapping live
+///    windows resolve to the latest `sim_start` (the most recently started
+///    replay), then the longer duration, then the earliest list position.
+/// 2. Otherwise the **nearest upcoming** window (smallest `sim_start`).
+/// 3. Otherwise the **most recently ended** window (largest `sim_end`).
+pub fn select_window(
+    candidates: &[(DateTime<Utc>, u64)],
+    now: DateTime<Utc>,
+    offset_hours: f64,
+) -> Option<WindowSelection> {
+    let mut live: Option<WindowSelection> = None;
+    let mut upcoming: Option<WindowSelection> = None;
+    let mut offline: Option<WindowSelection> = None;
+
+    for (index, &(start, duration)) in candidates.iter().enumerate() {
+        let evaluation = evaluate(now, start, duration, offset_hours);
+        let candidate = WindowSelection { index, evaluation };
+        match candidate.evaluation.state {
+            TimeshiftState::Live => {
+                let wins = match &live {
+                    None => true,
+                    Some(current) => {
+                        let cur_dur = candidates[current.index].1;
+                        (candidate.evaluation.sim_start, duration)
+                            > (current.evaluation.sim_start, cur_dur)
+                    }
+                };
+                if wins {
+                    live = Some(candidate);
+                }
+            }
+            TimeshiftState::Upcoming => {
+                let wins = match &upcoming {
+                    None => true,
+                    Some(current) => candidate.evaluation.sim_start < current.evaluation.sim_start,
+                };
+                if wins {
+                    upcoming = Some(candidate);
+                }
+            }
+            TimeshiftState::Offline => {
+                let wins = match &offline {
+                    None => true,
+                    Some(current) => {
+                        (candidate.evaluation.sim_end, candidate.evaluation.sim_start)
+                            > (current.evaluation.sim_end, current.evaluation.sim_start)
+                    }
+                };
+                if wins {
+                    offline = Some(candidate);
+                }
+            }
+        }
+    }
+
+    live.or(upcoming).or(offline)
 }
 
 fn ceil_seconds(span: ChronoDuration) -> i64 {
@@ -303,7 +379,12 @@ mod tests {
         let zero = evaluate(vod_start(), vod_start(), 0, 0.0);
         assert_eq!(zero.state, TimeshiftState::Offline);
 
-        let result = evaluate(vod_start() + ChronoDuration::seconds(30), vod_start(), 60, 0.0);
+        let result = evaluate(
+            vod_start() + ChronoDuration::seconds(30),
+            vod_start(),
+            60,
+            0.0,
+        );
         assert_eq!(result.progress, Some(0.5));
         assert!(result.progress.unwrap() >= 0.0 && result.progress.unwrap() <= 1.0);
     }
@@ -312,7 +393,10 @@ mod tests {
     fn offset_is_added_to_real_start_not_to_now() {
         // 0.5h offset on a 10 minute VOD: window opens at 12:30.
         let result = evaluate(at(12, 15, 0), vod_start(), 600, 0.5);
-        assert_eq!(result.sim_start, vod_start() + ChronoDuration::seconds(1_800));
+        assert_eq!(
+            result.sim_start,
+            vod_start() + ChronoDuration::seconds(1_800)
+        );
         assert_eq!(result.state, TimeshiftState::Upcoming);
         assert_eq!(result.starts_in_seconds, Some(900));
     }
@@ -323,6 +407,67 @@ mod tests {
         assert_eq!(result.sim_start, vod_start());
         assert_eq!(result.state, TimeshiftState::Live);
         assert_eq!(result.join_seconds, Some(0));
+    }
+
+    #[test]
+    fn selection_prefers_active_replay_over_newer_vod() {
+        // Regression (BUG_REVIEW #1): yesterday's 4h stream started 18:00.
+        // At +24h it airs today 18:00-22:00. A newer VOD from today must not
+        // hide that active replay.
+        let yesterday_18 = Utc.with_ymd_and_hms(2024, 3, 1, 18, 0, 0).unwrap();
+        let today_19 = Utc.with_ymd_and_hms(2024, 3, 2, 19, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2024, 3, 2, 19, 0, 0).unwrap();
+        // Newest first, as the API returns them.
+        let candidates = [
+            (today_19, 3 * 3_600),     // today's stream -> sim tomorrow 19:00
+            (yesterday_18, 4 * 3_600), // yesterday's -> sim today 18:00-22:00
+        ];
+        let selected = select_window(&candidates, now, 24.0).expect("a candidate");
+        assert_eq!(selected.index, 1);
+        assert_eq!(selected.evaluation.state, TimeshiftState::Live);
+        assert_eq!(selected.evaluation.join_seconds, Some(3_600));
+        assert_eq!(
+            selected.evaluation.sim_start,
+            Utc.with_ymd_and_hms(2024, 3, 2, 18, 0, 0).unwrap()
+        );
+        assert_eq!(
+            selected.evaluation.sim_end,
+            Utc.with_ymd_and_hms(2024, 3, 2, 22, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn selection_overlap_picks_latest_start() {
+        let now = at(15, 0, 0);
+        // Both live at 15:00 with offset 0: A 10:00-18:00, B 14:00-16:00.
+        let candidates = [(at(14, 0, 0), 2 * 3_600), (at(10, 0, 0), 8 * 3_600)];
+        let selected = select_window(&candidates, now, 0.0).expect("a candidate");
+        assert_eq!(selected.index, 0, "later sim_start wins the overlap");
+        assert_eq!(selected.evaluation.join_seconds, Some(3_600));
+    }
+
+    #[test]
+    fn selection_upcoming_picks_nearest_start() {
+        let now = at(12, 0, 0);
+        let candidates = [(at(20, 0, 0), 3_600), (at(13, 30, 0), 3_600)];
+        let selected = select_window(&candidates, now, 0.0).expect("a candidate");
+        assert_eq!(selected.index, 1);
+        assert_eq!(selected.evaluation.state, TimeshiftState::Upcoming);
+        assert_eq!(selected.evaluation.starts_in_seconds, Some(5_400));
+    }
+
+    #[test]
+    fn selection_all_past_picks_most_recently_ended() {
+        let now = at(23, 0, 0);
+        let candidates = [(at(20, 0, 0), 3_600), (at(8, 0, 0), 7_200)];
+        let selected = select_window(&candidates, now, 0.0).expect("a candidate");
+        assert_eq!(selected.index, 0);
+        assert_eq!(selected.evaluation.state, TimeshiftState::Offline);
+    }
+
+    #[test]
+    fn selection_empty_is_none() {
+        assert!(select_window(&[], at(12, 0, 0), 24.0).is_none());
     }
 
     #[test]

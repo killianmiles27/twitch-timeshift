@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Twitch Timeshift Player</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0f0f12; color: #ededf0;
+        font-family: "Segoe UI", system-ui, sans-serif; }
+      #player { position: fixed; inset: 0; }
+      #player iframe { width: 100%; height: 100%; border: 0; display: block; }
+      .overlay {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        background: rgba(10, 10, 14, 0.88); padding: 24px; text-align: center;
+      }
+      .overlay[hidden] { display: none; }
+      .overlay h1 { font-size: 17px; margin: 0 0 8px; }
+      .overlay p { color: #a9a9b4; font-size: 13.5px; margin: 0 0 14px; max-width: 46ch; }
+      .overlay .row { display: flex; gap: 9px; justify-content: center; flex-wrap: wrap; }
+      .overlay button, .overlay a.btn {
+        font: 600 13px "Segoe UI", system-ui, sans-serif; border-radius: 9px;
+        padding: 8px 14px; cursor: pointer; text-decoration: none;
+        background: #7c3aed; color: #fff; border: 1px solid transparent;
+      }
+      .overlay a.ghost { background: #17171c; border-color: #26262f; color: #ededf0; }
+      .statusbar {
+        position: fixed; left: 10px; bottom: 10px; z-index: 5;
+        font: 500 11.5px "Cascadia Code", ui-monospace, monospace;
+        color: #a9a9b4; background: rgba(15, 15, 18, 0.82);
+        border: 1px solid #26262f; border-radius: 999px; padding: 4px 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="player"></div>
+    <div id="status" class="statusbar" role="status">Player: opening…</div>
+    <div id="overlay" class="overlay" hidden>
+      <div>
+        <h1 id="overlayTitle">Playback problem</h1>
+        <p id="overlayText"></p>
+        <div class="row">
+          <button id="playBtn" type="button" hidden>Play video</button>
+          <button id="reloadBtn" type="button">Reload player</button>
+          <a id="twitchLink" class="btn ghost" href="#" target="_blank" rel="noreferrer">Open on Twitch</a>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/player.ts"></script>
+  </body>
+</html>
